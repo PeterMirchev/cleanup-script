@@ -451,7 +451,19 @@ function Invoke-Cleanup {
         $usersRoot = Assert-OnCDrive 'C:\Users'
         $swDup = [System.Diagnostics.Stopwatch]::StartNew()
 
-        $excludeDirLike = @('*\AppData\Roaming', '*\AppData\Local\Microsoft')
+        # Directories pruned at the walk (never descended into). De-duplicating
+        # application/dependency/repo folders is unsafe: files that are
+        # byte-identical there are NOT redundant - the app needs its own copy
+        # (this is what previously broke a Discord install). So we skip the
+        # entire AppData tree and common code/dependency dirs, and only chase
+        # duplicates in real user content (Documents, Downloads, media, etc.).
+        $excludeDirLike = @(
+            '*\AppData',          # all per-user app data (Discord, browsers, IDE caches, ...)
+            '*\AppData\*',        # belt-and-braces in case of junctions
+            '*\node_modules',     # dependency files apps/builds require even when identical
+            '*\.git',             # repository internals
+            '*\.gradle', '*\.m2', '*\.nuget', '*\vendor'  # build/dependency caches
+        )
         $protectedExt = $Script:ProtectedExtensions
 
         Write-Log ("  Scanning files >= {0} (pruning excluded dirs)..." -f (Format-Size $Script:DuplicateMinSizeBytes))

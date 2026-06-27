@@ -22,8 +22,10 @@ all with hard safety guards so nothing outside `C:\` is ever touched.
 - **Protected items** — never deletes from `C:\Program Files`, `C:\Program Files (x86)`,
   or `C:\Windows\System32`, and never deletes `.exe`, `.dll`, `.sys`, `.inf`, or `.msi`
   files.
-- **Fast duplicate finder** — groups by size, then a 64 KB partial hash, then full
-  SHA-256 only on the remaining collisions. Keeps the newest copy of each duplicate.
+- **Fast, safe duplicate finder** — groups by size, then a 64 KB partial hash, then
+  full SHA-256 only on the remaining collisions. Keeps the newest copy of each
+  duplicate. Skips the entire `AppData` tree and code/dependency folders so it never
+  deletes files an installed application depends on.
 - **Locked files are skipped**, not fatal.
 - **Full transcript log** of every run saved to `C:\CleanupLogs\`.
 
@@ -93,7 +95,7 @@ happy with what it would remove, untick Dry run and run it for real.
 | Memory dumps | `C:\Windows\MEMORY.DMP`, `C:\Windows\Minidump` |
 | Delivery Optimization | `...\NetworkService\...\DeliveryOptimization\Cache` |
 | Disk Cleanup | Runs `cleanmgr /sagerun:1` with a pre-seeded safe profile |
-| Duplicate files | Duplicates under `C:\Users` (skips `AppData\Roaming` and `AppData\Local\Microsoft`) |
+| Duplicate files | Duplicates under `C:\Users`, **excluding** the entire `AppData` tree plus `node_modules`, `.git`, and build caches (so application/dependency files are never touched) |
 | Hibernation file | Disables hibernation via `powercfg /h off` (optional) |
 | Pagefile | Offers System-managed size if pagefile > 1.5× RAM (optional) |
 
