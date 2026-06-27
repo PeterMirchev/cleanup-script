@@ -1,0 +1,10 @@
+# Cleanup run logs (generated at runtime)
+CleanupLogs/
+*.log
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.vs/
+.idea/
+*.swp
