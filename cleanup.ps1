@@ -28,6 +28,12 @@ $Script:DisableHibernation        = 'ask'              # $true / $false / 'ask'
 $Script:ManagePagefile            = 'ask'              # $true / $false / 'ask'
 $Script:DuplicateMinSizeBytes     = 1MB
 $Script:DuplicatePartialHashBytes = 65536
+
+# The duplicate scan ONLY looks inside these user-content folders (under each
+# C:\Users\<user> profile, and any OneDrive\<folder>). This allow-list is the
+# core safety rule: application/install directories are never entered, so the
+# scan can never delete files a program depends on.
+$Script:DuplicateScanFolders = @('Downloads', 'Documents', 'Desktop', 'Pictures', 'Music', 'Videos')
 $Script:UseGui                    = $true              # $false = console mode
 
 # Master list of categories (key + friendly name), drives both the UI and
@@ -214,6 +220,17 @@ function Get-Contents {
     $safe = Assert-OnCDrive $Dir
     if (-not (Test-Path -LiteralPath $safe)) { return @() }
     Get-ChildItem -LiteralPath $safe -Force -ErrorAction SilentlyContinue
+}
+
+function Test-IsReparsePoint {
+    # Junction / symbolic link - we must never follow these during the
+    # duplicate walk, or a link could redirect us into an app directory
+    # (e.g. C:\Users\All Users -> C:\ProgramData) or off C:\ entirely.
+    param([string]$Path)
+    try {
+        return (([System.IO.File]::GetAttributes($Path)) -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    } catch { return $false }
 }
 
 function Get-PartialHash {
@@ -451,25 +468,44 @@ function Invoke-Cleanup {
         $usersRoot = Assert-OnCDrive 'C:\Users'
         $swDup = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Directories pruned at the walk (never descended into). De-duplicating
-        # application/dependency/repo folders is unsafe: files that are
-        # byte-identical there are NOT redundant - the app needs its own copy
-        # (this is what previously broke a Discord install). So we skip the
-        # entire AppData tree and common code/dependency dirs, and only chase
-        # duplicates in real user content (Documents, Downloads, media, etc.).
+        # SAFETY MODEL: allow-list, not deny-list. The scan only descends into a
+        # fixed set of user-content folders (see $Script:DuplicateScanFolders).
+        # Application/install directories (AppData, Program Files, etc.) are never
+        # entered, so the scan can never delete a file a program depends on - this
+        # is the robust fix for the kind of breakage that hit Discord. The prune
+        # list below is a second line of defense for code/dependency folders that
+        # may legitimately live inside a content folder (e.g. a project in
+        # Documents): de-duplicating those is unsafe even though they are "content".
         $excludeDirLike = @(
-            '*\AppData',          # all per-user app data (Discord, browsers, IDE caches, ...)
-            '*\AppData\*',        # belt-and-braces in case of junctions
-            '*\node_modules',     # dependency files apps/builds require even when identical
-            '*\.git',             # repository internals
-            '*\.gradle', '*\.m2', '*\.nuget', '*\vendor'  # build/dependency caches
+            '*\AppData', '*\AppData\*',                    # never (also can't be reached via allow-list)
+            '*\node_modules',                              # dependency files builds require even when identical
+            '*\.git', '*\.svn', '*\.hg',                   # repository internals
+            '*\.gradle', '*\.m2', '*\.nuget', '*\vendor'   # build/dependency caches
         )
         $protectedExt = $Script:ProtectedExtensions
 
-        Write-Log ("  Scanning files >= {0} (pruning excluded dirs)..." -f (Format-Size $Script:DuplicateMinSizeBytes))
+        # Seed the walk with ONLY the allow-listed content folders that exist,
+        # for every user profile under C:\Users (plus OneDrive-redirected copies).
+        $roots = New-Object 'System.Collections.Generic.List[string]'
+        try { $userDirs = [System.IO.Directory]::EnumerateDirectories($usersRoot) } catch { $userDirs = @() }
+        foreach ($userDir in $userDirs) {
+            # Skip junction profiles like 'All Users' (-> ProgramData) and 'Default User'.
+            if (Test-IsReparsePoint $userDir) { continue }
+            foreach ($name in $Script:DuplicateScanFolders) {
+                foreach ($cand in @((Join-Path $userDir $name), (Join-Path $userDir "OneDrive\$name"))) {
+                    if ((Test-Path -LiteralPath $cand) -and (Test-OnCDrive $cand) -and -not (Test-IsReparsePoint $cand)) {
+                        $roots.Add((Assert-OnCDrive $cand))
+                    }
+                }
+            }
+        }
+        Write-Log ("  Scanning files >= {0} in {1} content folder(s): {2}" -f `
+            (Format-Size $Script:DuplicateMinSizeBytes), $roots.Count, ($Script:DuplicateScanFolders -join ', '))
+        if ($roots.Count -eq 0) { Write-Log "  No content folders found - nothing to scan." }
+
         $candidates = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
         $stack = New-Object 'System.Collections.Generic.Stack[string]'
-        $stack.Push($usersRoot)
+        foreach ($r in $roots) { $stack.Push($r) }
         $walkCount = 0
         while ($stack.Count -gt 0) {
             $dir = $stack.Pop()
@@ -478,7 +514,8 @@ function Invoke-Cleanup {
             foreach ($sd in $subs) {
                 $skip = $false
                 foreach ($pat in $excludeDirLike) { if ($sd -like $pat) { $skip = $true; break } }
-                if (-not $skip) { $stack.Push($sd) }
+                # Never follow junctions/symlinks - they can escape the allow-list.
+                if (-not $skip -and -not (Test-IsReparsePoint $sd)) { $stack.Push($sd) }
             }
             try { $fps = [System.IO.Directory]::EnumerateFiles($dir) } catch { $fps = @() }
             foreach ($fp in $fps) {
